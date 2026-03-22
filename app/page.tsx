@@ -15,15 +15,22 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import { Plus, Users, Calendar, User, CalendarCheck } from "lucide-react";
+import {
+  slotKey as slot,
+  availabilityInViewerTz,
+  commonUtcInstants,
+  utcInstantsToViewerSlots,
+  TIMEZONE_OPTIONS,
+} from "@/lib/timezone";
+import type { TimeSlot } from "@/lib/timezone";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-type TimeSlot = string; // "day-hour", e.g. "0-9" = Monday 9am
 
 type Member = {
   id: string;
   name: string;
   color: string;
+  timeZone: string;
   availability: TimeSlot[];
 };
 
@@ -41,8 +48,6 @@ const COLORS = [
   "bg-cyan-500",
 ];
 
-const slot = (day: number, hour: number): TimeSlot => `${day}-${hour}`;
-
 // ─── Fake initial data ────────────────────────────────────────────────────────
 
 // 假資料：三人皆有「週三 9–11」共同空閒，方便展示
@@ -51,6 +56,7 @@ const INITIAL_MEMBERS: Member[] = [
     id: "me",
     name: "我",
     color: "bg-blue-500",
+    timeZone: "Asia/Taipei",
     availability: [
       slot(0, 9), slot(0, 10), slot(0, 11),          // Mon 9–12
       slot(0, 14), slot(0, 15), slot(0, 16),         // Mon 14–17
@@ -63,6 +69,7 @@ const INITIAL_MEMBERS: Member[] = [
     id: "xiao-liang",
     name: "小梁",
     color: "bg-green-500",
+    timeZone: "Asia/Taipei",
     availability: [
       slot(0, 9),  slot(0, 10), slot(0, 11),         // Mon 9–12
       slot(2, 9),  slot(2, 10), slot(2, 11),         // Wed 9–12（共同）
@@ -74,6 +81,7 @@ const INITIAL_MEMBERS: Member[] = [
     id: "lu-lu",
     name: "盧盧",
     color: "bg-purple-500",
+    timeZone: "Asia/Taipei",
     availability: [
       slot(1, 10), slot(1, 11), slot(1, 12),         // Tue 10–13
       slot(2, 9),  slot(2, 10), slot(2, 11),         // Wed 9–12（共同）
@@ -205,6 +213,62 @@ function ScheduleGrid({
   );
 }
 
+
+/** 多人空閒：每格以橫向色塊顯示在「檢視者時區」下誰有空 */
+function MultiScheduleGrid({
+  layers,
+}: {
+  layers: { name: string; color: string; slots: Set<TimeSlot> }[];
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr>
+            <th className="w-14" />
+            {DAYS.map((d) => (
+              <th key={d} className="p-2 text-center font-medium text-sm">
+                {d}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {HOURS.map((h) => (
+            <tr key={h}>
+              <td className="text-right pr-3 text-muted-foreground text-xs py-0.5 whitespace-nowrap">
+                {h}:00
+              </td>
+              {DAYS.map((_, d) => {
+                const s = slot(d, h);
+                const present = layers.filter((l) => l.slots.has(s));
+                return (
+                  <td key={d} className="p-0.5">
+                    <div className="h-8 rounded border border-border overflow-hidden flex">
+                      {present.length === 0 ? (
+                        <div className="flex-1 bg-muted min-h-full" />
+                      ) : (
+                        present.map((l) => (
+                          <div
+                            key={l.name}
+                            className={`${l.color} min-h-full opacity-90`}
+                            style={{ flex: 1 }}
+                            title={`${l.name} 空閒`}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ─── Legend ───────────────────────────────────────────────────────────────────
 
 function Legend({ items }: { items: { color: string; label: string }[] }) {
@@ -232,10 +296,9 @@ export default function MeetFlow() {
   const others = members.filter((m) => m.id !== "me");
   const viewing = members.find((m) => m.id === viewId) ?? others[0];
 
-  const commonSlots = DAYS.flatMap((_, d) =>
-    HOURS.filter((h) =>
-      members.every((m) => m.availability.includes(slot(d, h)))
-    ).map((h) => slot(d, h))
+  const commonSlots = utcInstantsToViewerSlots(
+    commonUtcInstants(members),
+    me.timeZone
   );
 
   function batchToggleMySlots(slots: TimeSlot[], fill: boolean) {
@@ -257,15 +320,29 @@ export default function MeetFlow() {
     const name = newName.trim();
     if (!name) return;
     const color = COLORS[members.length % COLORS.length];
+    const defaultTz =
+      typeof window !== "undefined"
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : "Asia/Taipei";
     const newMember: Member = {
       id: `member-${Date.now()}`,
       name,
       color,
+      timeZone: defaultTz,
       availability: [],
     };
     setMembers((prev) => [...prev, newMember]);
     setNewName("");
     setOpen(false);
+  }
+
+  /** 格子語意為「在目前時區下的週几／幾點」，換時區時保留相同格子，改以新時區解讀（不改成同一 UTC 瞬間，避免整排掉到週末或變 0 格） */
+  function setMemberTimezone(id: string, newTz: string) {
+    setMembers((prev) =>
+      prev.map((m) =>
+        m.id !== id || m.timeZone === newTz ? m : { ...m, timeZone: newTz }
+      )
+    );
   }
 
   return (
@@ -350,11 +427,32 @@ export default function MeetFlow() {
                         {m.name[0]}
                       </AvatarFallback>
                     </Avatar>
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 space-y-1.5">
                       <p className="font-medium text-sm truncate">{m.name}</p>
                       <p className="text-xs text-muted-foreground">
                         {m.availability.length} 個空閒時段
                       </p>
+                      <label className="block text-[11px] text-muted-foreground">
+                        時區（只改解讀方式，已選格子會保留）
+                        <select
+                          className="mt-0.5 w-full max-w-[200px] rounded-md border border-input bg-background px-2 py-1 text-xs"
+                          value={m.timeZone}
+                          onChange={(e) =>
+                            setMemberTimezone(m.id, e.target.value)
+                          }
+                        >
+                          {!TIMEZONE_OPTIONS.some(
+                            (o) => o.value === m.timeZone
+                          ) && (
+                            <option value={m.timeZone}>{m.timeZone}</option>
+                          )}
+                          {TIMEZONE_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
                     {m.id === "me" && (
                       <Badge variant="outline" className="text-xs shrink-0">
@@ -372,7 +470,8 @@ export default function MeetFlow() {
             <div className="mb-5">
               <h2 className="text-base font-semibold">我的時間表</h2>
               <p className="text-sm text-muted-foreground mt-0.5">
-                點擊或拖曳選取矩形範圍來批次切換空閒時段
+                點擊格子來切換你的空閒時段。格子以「你的時區」儲存與顯示（
+                {me.timeZone}）。
               </p>
             </div>
             <Card>
@@ -396,7 +495,9 @@ export default function MeetFlow() {
             <div className="mb-5">
               <h2 className="text-base font-semibold">查看成員時間表</h2>
               <p className="text-sm text-muted-foreground mt-0.5">
-                選擇成員來查看他們的空閒時段
+                選擇一位成員作為「檢視視角」：下方網格以該成員的時區顯示
+                <strong className="font-medium text-foreground">所有人</strong>
+                的空閒（每位成員的格子先依各自時區解讀，再換算成該視角的當地時間）。
               </p>
             </div>
 
@@ -430,20 +531,27 @@ export default function MeetFlow() {
                             {viewing.name[0]}
                           </AvatarFallback>
                         </Avatar>
-                        {viewing.name} 的時間表
+                        以 {viewing.name} 的時區檢視（{viewing.timeZone}）
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
                       <Legend
-                        items={[
-                          { color: "bg-primary", label: "空閒" },
-                          {
-                            color: "bg-muted border border-border",
-                            label: "忙碌",
-                          },
-                        ]}
+                        items={members.map((m) => ({
+                          color: m.color,
+                          label: `${m.name} 空閒`,
+                        }))}
                       />
-                      <ScheduleGrid availability={viewing.availability} />
+                      <MultiScheduleGrid
+                        layers={members.map((m) => ({
+                          name: m.name,
+                          color: m.color,
+                          slots: availabilityInViewerTz(
+                            m.availability,
+                            m.timeZone,
+                            viewing.timeZone
+                          ),
+                        }))}
+                      />
                     </CardContent>
                   </Card>
                 )}
@@ -456,7 +564,8 @@ export default function MeetFlow() {
             <div className="mb-5">
               <h2 className="text-base font-semibold">共同空閒時間</h2>
               <p className="text-sm text-muted-foreground mt-0.5">
-                所有 {members.length} 位成員都空閒的時段
+                所有 {members.length} 位成員都空閒的時段；網格以「你的時區」顯示（
+                {me.timeZone}）。
               </p>
             </div>
 
